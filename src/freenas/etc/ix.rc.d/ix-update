@@ -11,6 +11,7 @@
 
 readonly UPDATE_FAILED_LOG="/data/update.failed"
 HBA_FIRMWARE_UPDATE="/data/.hba_firmware_update"
+SES_FIRMWARE_UPDATE="/data/.ses_firmware_update"
 REBOOT_REQUIRED=0
 
 
@@ -86,7 +87,7 @@ db_update()
 {
 	if [ -f ${HBA_FIRMWARE_UPDATE} ]; then
 		mount -uw /
-		if [ -f /usr/local/sbin/firmware_update.py ]; then
+		if [ -f /data/license ]; then
 			LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/python /usr/local/sbin/firmware_update.py
 			if [ $? -eq 0 ]; then
 				# Users often wonder why a 3rd reboot occurs on their system
@@ -116,7 +117,18 @@ db_update()
 			rm ${HBA_FIRMWARE_UPDATE}
 		fi
 	fi
-			
+
+	if [ -f ${SES_FIRMWARE_UPDATE} ]; then
+		mount -uw /
+		if [ -f /data/license ]; then
+			LD_LIBRARY_PATH=/usr/local/lib /usr/local/bin/python /usr/local/sbin/firmware_update_ses.py
+			if [ $? -eq 0 ]; then
+				REBOOT_REQUIRED=1
+			fi
+		fi
+		rm ${SES_FIRMWARE_UPDATE}
+	fi
+
 	if [ ! -f $NEED_UPDATE_SENTINEL ]; then
 		if [ ${REBOOT_REQUIRED} -eq 1 ]; then
 			reboot

@@ -1,7 +1,7 @@
 # $FreeBSD$
 
 PORTNAME=	firmware
-PORTVERSION=	201909261555
+PORTVERSION=	202008211423
 CATEGORIES=	freenas
 VALID_CATEGORIES+=	freenas
 
@@ -9,7 +9,7 @@ MAINTAINER=	dev@ixsystems.com
 COMMENT=	Firmware files
 
 USE_GITHUB=	yes
-GH_TUPLE+=	freenas:firmware:86926bb
+GH_TUPLE+=	freenas:firmware:4aac9e5
 
 NO_BUILD=	yes
 
