@@ -27,6 +27,13 @@ class CIFSService(SimpleService):
             await self._freebsd_service("smbd", "start", force=True)
             await self._freebsd_service("winbindd", "start", force=True)
         if osc.IS_LINUX:
+            is_clustered = await self.middleware.call("smb.getparm", "clustering", "global")
+            if is_clustered:
+                cluster_healthy = await self.middleware.call("ctdb.general.healthy")
+                if not cluster_healthy:
+                    self.middleware.logger.warning("Cluster is unhealthy. Refusing to start SMB service.")
+                    return
+
             await self._systemd_unit("smbd", "start")
             await self._systemd_unit("winbind", "start")
         if announce["netbios"]:
@@ -63,6 +70,10 @@ class CIFSService(SimpleService):
 
     async def after_stop(self):
         await self.middleware.call("service.reload", "mdns")
+
+    async def before_reload(self):
+        reload_jid = await self.middleware.call('sharing.smb.sync_registry')
+        await reload_jid.wait()
 
     async def after_reload(self):
         await self.middleware.call("service.reload", "mdns")

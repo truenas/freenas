@@ -61,6 +61,17 @@ class SMBService(Service):
         if group in SMBBuiltin.unix_groups():
             return await self.add_builtin_group(group)
 
+        ha_mode = await self.middleware.call('smb.get_smb_ha_mode')
+        if ha_mode == 'CLUSTERED':
+            """
+            Remove this check once we have a reliable method of ensuring local groups
+            are synchronized between nodes. SMB builtin groups are hard-coded and therefore safe
+            to add. They are also required for SMB service to properly function.
+            """
+            self.logger.debug("Clustered groups not yet implemented in SCALE. "
+                              "Skipping groupmap addition for %s.", group)
+            return
+
         disallowed_list = ['USERS', 'ADMINISTRATORS', 'GUESTS']
         existing_groupmap = await self.groupmap_list()
 
@@ -138,6 +149,17 @@ class SMBService(Service):
                     await self.groupmap_delete({"ntgroup": b.name.lower().capitalize()})
 
                 await self.groupmap_add(b.value[0], passdb_backend)
+
+        ha_mode = await self.middleware.call('smb.get_smb_ha_mode')
+        if ha_mode == 'CLUSTERED':
+            """
+            Remove this check once we have a reliable method of ensuring local groups
+            are synchronized between nodes. SMB builtin groups are hard-coded and therefore safe
+            to add. They are also required for SMB service to properly function.
+            """
+            self.logger.debug("Clustered groups not yet implemented in SCALE. "
+                              "Skipping groupmap sychrnoization.")
+            return
 
         groups = await self.middleware.call('group.query', [('builtin', '=', False), ('smb', '=', True)])
         for g in groups:

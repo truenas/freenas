@@ -70,6 +70,11 @@ class SMBService(Service):
         Accounts that are 'locked' in the UI will have their corresponding passdb entry
         disabled.
         """
+        ha_mode = await self.middleware.call('smb.get_smb_ha_mode')
+        if ha_mode == "CLUSTERED":
+            self.logger.debug("passdb support not yet implemented in clustered TrueNAS.")
+            return
+
         if passdb_backend is None:
             passdb_backend = await self.middleware.call('smb.getparm',
                                                         'passdb backend',
@@ -145,6 +150,11 @@ class SMBService(Service):
 
     @private
     async def remove_passdb_user(self, username):
+        ha_mode = await self.middleware.call('smb.get_smb_ha_mode')
+        if ha_mode == "CLUSTERED":
+            self.logger.debug("passdb support not yet implemented in clustered TrueNAS.")
+            return
+
         deluser = await run([SMBCmd.PDBEDIT.value, '-d', '0', '-x', username], check=False)
         if deluser.returncode != 0:
             raise CallError(f'Failed to delete user [{username}]: {deluser.stderr.decode()}')
@@ -182,6 +192,11 @@ class SMBService(Service):
         Delete any entries in the passdb_tdb file that don't exist in the config file.
         This method may cause temporary service disruption for SMB.
         """
+        ha_mode = await self.middleware.call('smb.get_smb_ha_mode')
+        if ha_mode == "CLUSTERED":
+            self.logger.debug("passdb support not yet implemented in clustered TrueNAS.")
+            return
+
         passdb_backend = await self.middleware.call('smb.getparm',
                                                     'passdb backend',
                                                     'global')

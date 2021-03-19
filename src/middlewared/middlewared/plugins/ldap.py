@@ -23,6 +23,23 @@ from middlewared.plugins.directoryservices import DSStatus, SSL
 
 _int32 = struct.Struct('!i')
 
+DEFAULT_LDAP_PARAMETERS = {
+    "server role": "member server",
+    "kerberos method": None,
+    "security": "user",
+    "ldap admin dn": None,
+    "ldap suffix": None,
+    "ldap replication sleep": "1000",
+    "ldap passwd sync": "Yes",
+    "ldap ssl": None,
+    "ldapsam:trusted": "Yes",
+    "domain logons": "Yes",
+    "passdb backend": None,
+    "local master": "No",
+    "domain master": "No",
+    "preferred master": "No",
+}
+
 
 class NlscdConst(enum.Enum):
     NSLCD_CONF_PATH = '/usr/local/etc/nslcd.conf'
@@ -502,6 +519,10 @@ class LDAPService(ConfigService):
 
     @private
     async def common_validate(self, new, old, verrors):
+        ha_mode = await self.middleware.call('smb.get_smb_ha_mode')
+        if ha_mode == "clustered":
+            verrors.add("ldap_upate", "Clustered LDAP service not yet implemented")
+
         if not new["enable"]:
             return
 
@@ -966,10 +987,13 @@ class LDAPService(ConfigService):
             await self.nslcd_cmd('restart')
 
         if ldap['has_samba_schema']:
-            await self.middleware.call('etc.generate', 'smb')
+            await self.middleware.call('smb.initialize_globals')
+            await self.synchronize()
+            await self.middleware.call('idmap.synchronize')
             await self.middleware.call('smb.store_ldap_admin_password')
-            await self.middleware.call('service.restart', 'cifs')
             await self.middleware.call('smb.set_passdb_backend', 'ldapsam')
+            await self.middleware.call('idmap.synchronize')
+            await self.middleware.call('service.restart', 'cifs')
 
         await self.set_state(DSStatus['HEALTHY'])
         await self.middleware.call('service.start', 'dscache')
@@ -984,7 +1008,8 @@ class LDAPService(ConfigService):
         await self.middleware.call('etc.generate', 'ldap')
         await self.middleware.call('etc.generate', 'pam')
         if ldap['has_samba_schema']:
-            await self.middleware.call('etc.generate', 'smb')
+            await self.synchronize()
+            await self.middleware.call('idmap.synchronize')
             await self.middleware.call('service.restart', 'cifs')
             await self.middleware.call('smb.synchronize_passdb')
             await self.middleware.call('smb.synchronize_group_mappings')
@@ -993,6 +1018,51 @@ class LDAPService(ConfigService):
         await self.middleware.call('service.stop', 'dscache')
         await self.nslcd_cmd('stop')
         await self.set_state(DSStatus['DISABLED'])
+
+    @private
+    async def ldap_to_registry(self, data):
+        rv = {}
+        if data['enable'] is False:
+            return rv
+
+        for k, v in DEFAULT_LDAP_PARAMETERS.items():
+            if v is None:
+                continue
+            rv[k] = v
+
+        uri_string = " ".join(data["uri_list"])
+        rv.update({
+            "passdb backend": f'ldapsam:"{uri_string}"',
+            "ldap admin dn": data["binddn"],
+            "ldap suffix": data["basedn"],
+            "ldap ssl": "start tls" if data['ssl'] == "STARTTLS" else "off",
+        })
+
+        if data['kerberos_principal']:
+            rv.update({"kerberos method": "system keytab"})
+
+        return rv
+
+    @private
+    async def diff_conf_and_registry(self, data):
+        smbconf = (await self.middleware.call('smb.reg_globals'))['ds']
+        to_check = await self.ldap_to_registry(data)
+
+        r = smbconf
+        s_keys = set(to_check.keys())
+        r_keys = set(r.keys())
+        intersect = s_keys.intersection(r_keys)
+        return {
+            'added': {x: to_check[x] for x in s_keys - r_keys},
+            'removed': {x: r[x] for x in r_keys - s_keys},
+            'modified': {x: (to_check[x], r[x]) for x in intersect if to_check[x] != r[x]},
+        }
+
+    @private
+    async def synchronize(self):
+        conf = await self.config()
+        diff = await self.diff_conf_and_registry(conf)
+        await self.middleware.call('smb.reg_apply_conf_diff', diff)
 
     @private
     @job(lock='fill_ldap_cache')

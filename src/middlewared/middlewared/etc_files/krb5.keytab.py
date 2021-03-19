@@ -17,7 +17,7 @@ async def mit_copy(temp_keytab):
                           stderr=subprocess.PIPE,
                           stdin=subprocess.PIPE)
     output = await kt_copy.communicate(
-        f'rkt {temp_keytab}\nwkt {keytabfile}'.encode()
+        f'rkt {temp_keytab}\nwkt /etc/mit_tmp.keytab'.encode()
     )
     if output[1]:
         logger.debug(f"failed to generate [{keytabfile}]: {output[1].decode()}")
@@ -59,3 +59,9 @@ async def render(service, middleware):
         db_keytabfile = base64.b64decode(keytab['file'].encode())
         db_keytabname = keytab['id']
         await write_keytab(db_keytabname, db_keytabfile)
+
+    if osc.IS_LINUX:
+        with contextlib.suppress(OSError):
+            os.unlink(keytabfile)
+
+        os.rename("/etc/mit_tmp.keytab", keytabfile)

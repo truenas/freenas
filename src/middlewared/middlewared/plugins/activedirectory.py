@@ -12,7 +12,7 @@ import threading
 import time
 
 from dns import resolver
-from middlewared.plugins.smb import SMBCmd, SMBPath, WBCErr
+from middlewared.plugins.smb import SMBCmd, SMBPath, SMBHAMODE, WBCErr
 from middlewared.schema import accepts, Bool, Dict, Int, List, Str
 from middlewared.service import job, private, ConfigService, Service, ValidationError, ValidationErrors
 from middlewared.service_exception import CallError
@@ -31,6 +31,26 @@ from samba import (ntstatus, NTSTATUSError)
 
 LP_CTX = param.get_context()
 FEATURE_SEAL = 4
+
+DEFAULT_AD_PARAMETERS = {
+    "server role": "member server",
+    "kerberos method": "secrets and keytab",
+    "security": "ADS",
+    "local master": "No",
+    "domain master": "No",
+    "preferred master": "No",
+    "winbind cache time": "7200",
+    "winbind max domain connections": "10",
+    "client ldap sasl wrapping": "seal",
+    "template shell": "/bin/sh",
+    "ads dns update": None,
+    "realm": None,
+    "allow trusted domains": None,
+    "winbind enum users": None,
+    "winbind enum groups": None,
+    "winbind use default domain": None,
+    "winbind nss info": None,
+}
 
 
 class neterr(enum.Enum):
@@ -394,6 +414,25 @@ class ActiveDirectoryService(ConfigService):
                 "AD domain name is required."
             )
 
+    @accepts()
+    async def config(self):
+        ha_mode = SMBHAMODE[(await self.middleware.call('smb.get_smb_ha_mode'))]
+        if ha_mode != SMBHAMODE.CLUSTERED:
+            return await super().config()
+
+        rv = await self.middleware.call('directoryservices.get_conf',
+                                        self._config.datastore)
+        globals = (await self.middleware.call('smb.reg_globals'))['raw']
+        rv.update({
+            'domainname': globals.get('realm', ''),
+            'use_default_domain': globals.get('winbind use default domain', 'No') == 'Yes',
+            'allow_trusted_domains': globals.get('allow trusted domains', 'No') == 'Yes',
+            'ads_dns_updates': globals.get('ads dns updates', 'No') == 'Yes',
+            'nss_info': globals.get('winbind nss info', ''),
+            'enable': globals.get('security', 'user') == 'ADS',
+        })
+        return await self.middleware.call(self._config.datastore_extend, rv)
+
     @accepts(Dict(
         'activedirectory_update',
         Str('domainname', required=True),
@@ -505,6 +544,7 @@ class ActiveDirectoryService(ConfigService):
         machine account is generated. It is used for all future
         LDAP / AD interaction and the user-provided credentials are removed.
         """
+        await self.middleware.call("smb.cluster_check")
         verrors = ValidationErrors()
         old = await self.config()
         new = old.copy()
@@ -551,13 +591,52 @@ class ActiveDirectoryService(ConfigService):
                 )
 
         new = await self.ad_compress(new)
-        await self.middleware.call(
-            'datastore.update',
-            'directoryservice.activedirectory',
-            old['id'],
-            new,
-            {'prefix': 'ad_'}
-        )
+
+        """
+        first write relevant portions to our persistent datastore outside smb.conf
+        in non-clustered, this will be ctdb, in clustered case we'll write the
+        ad config to secrets.tdb.
+        """
+        ha_mode = SMBHAMODE[(await self.middleware.call('smb.get_smb_ha_mode'))]
+        if ha_mode != SMBHAMODE.CLUSTERED:
+            id = new.pop("id")
+            await self.middleware.call(
+                'datastore.update',
+                self._config.datastore,
+                id, new, {'prefix': 'ad_'}
+            )
+        else:
+            """
+            Write subset of our keys to secrets.tdb. This is replicated to
+            other cluster nodes. Remaining info will be pulled from smb.conf
+            in the activedirectory.config() method.
+            """
+            to_write = {
+                "id": new["id"],
+                "bindname": new["bindname"],
+                "verbose_logging": new["verbose_logging"],
+                "kerberos_principal": new["kerberos_principal"],
+                "kerberos_realm": new["kerberos_realm"],
+                "createcomputer": new["createcomputer"],
+                "disable_freenas_cache": new["disable_freenas_cache"],
+                "restrict_pam": new["restrict_pam"],
+                "timeout": new['timeout'],
+                "site": new['site'],
+                "dns_timeout": new['dns_timeout'],
+            }
+            await self.middleware.call(
+                'directoryservices.set_conf',
+                'directoryservice.activedirectory',
+                to_write
+            )
+
+        """
+        get our global config as related to directory services. We will use
+        this to generate a diff to apply to the smb.conf. Implicit in this is
+        that we only have a single directory service enabled at a time.
+        """
+        diff = await self.diff_conf_and_registry(new)
+        await self.middleware.call('smb.reg_apply_conf_diff', diff)
 
         start = False
         stop = False
@@ -580,6 +659,53 @@ class ActiveDirectoryService(ConfigService):
         ret = await self.config()
         ret.update({'job_id': job})
         return ret
+
+    @private
+    async def ad_to_registry(self, data):
+        rv = {}
+        if data['enable'] is False:
+            return rv
+
+        for k, v in DEFAULT_AD_PARAMETERS.items():
+            if v is None:
+                continue
+            rv[k] = v
+
+        rv.update({
+            "ads dns update": "Yes" if data.get("allow_dns_updates") else "No",
+            "realm": data["domainname"].upper(),
+            "allow trusted domains": "Yes" if data.get("allow_trusted_domains") else "No",
+            "winbind enum users": "No" if data.get("disable_freenas_cache") else "Yes",
+            "winbind enum groups": "No" if data.get("disable_freenas_cache") else "Yes",
+            "winbind use default domain": "Yes" if data.get("use_default_domain") else "No",
+        })
+        if data.get("nss_info"):
+            rv.update({"winbind nss info": data["nss_info"]})
+
+        return rv
+
+    @private
+    async def diff_conf_and_registry(self, data):
+        smbconf = (await self.middleware.call('smb.reg_globals'))['ds']
+        to_check = await self.ad_to_registry(data)
+
+        r = smbconf
+        s_keys = set(to_check.keys())
+        r_keys = set(r.keys())
+        intersect = s_keys.intersection(r_keys)
+        return {
+            'added': {x: to_check[x] for x in s_keys - r_keys},
+            'removed': {x: r[x] for x in r_keys - s_keys},
+            'modified': {x: (to_check[x], r[x]) for x in intersect if to_check[x] != r[x]},
+        }
+
+    @private
+    async def synchronize(self, data=None):
+        if data is None:
+            data = await self.config()
+
+        diff = await self.diff_conf_and_registry(data)
+        await self.middleware.call('smb.reg_apply_conf_diff', diff)
 
     @private
     async def set_state(self, state):
@@ -613,6 +739,7 @@ class ActiveDirectoryService(ConfigService):
         Start AD service. In 'UNIFIED' HA configuration, only start AD service
         on active storage controller.
         """
+        await self.middleware.call("smb.cluster_check")
         ad = await self.config()
         smb = await self.middleware.call('smb.config')
         smb_ha_mode = await self.middleware.call('smb.reset_smb_ha_mode')
@@ -629,6 +756,7 @@ class ActiveDirectoryService(ConfigService):
         if ad['verbose_logging']:
             self.logger.debug('Starting Active Directory service for [%s]', ad['domainname'])
         await self.middleware.call('datastore.update', self._config.datastore, ad['id'], {'ad_enable': True})
+        await self.synchronize()
         await self.middleware.call('etc.generate', 'hostname')
 
         """
@@ -722,6 +850,7 @@ class ActiveDirectoryService(ConfigService):
             await self.middleware.call('activedirectory.set_ntp_servers')
 
         job.set_progress(90, 'Restarting SMB server.')
+        await self.middleware.call('idmap.synchronize')
         await self.middleware.call('service.restart', 'cifs')
         await self.middleware.call('etc.generate', 'pam')
         await self.middleware.call('etc.generate', 'nss')
@@ -747,13 +876,15 @@ class ActiveDirectoryService(ConfigService):
 
     @private
     async def stop(self):
+        await self.middleware.call("smb.cluster_check")
         ad = await self.config()
         await self.middleware.call('datastore.update', self._config.datastore, ad['id'], {'ad_enable': False})
         await self.set_state(DSStatus['LEAVING'])
         await self.middleware.call('admonitor.stop')
         await self.middleware.call('etc.generate', 'hostname')
         await self.middleware.call('kerberos.stop')
-        await self.middleware.call('etc.generate', 'smb')
+        await self.synchronize()
+        await self.middleware.call('idmap.synchronize')
         await self.middleware.call('service.restart', 'cifs')
         await self.middleware.call('etc.generate', 'pam')
         await self.middleware.call('etc.generate', 'nss')

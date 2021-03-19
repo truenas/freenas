@@ -1,7 +1,7 @@
 from middlewared.service import private, Service, filterable
 from middlewared.service_exception import CallError
 from middlewared.utils import run, filter_list
-from middlewared.plugins.smb import SMBCmd, SMBSharePreset
+from middlewared.plugins.smb import SMBCmd, SMBHAMODE, SMBSharePreset
 from middlewared.utils import osc
 
 import errno
@@ -43,6 +43,14 @@ class SharingSMBService(Service):
         ]:
             raise CallError(f'Action [{action}] is not permitted.', errno.EPERM)
 
+        ha_mode = SMBHAMODE[(await self.middleware.call('smb.get_smb_ha_mode'))]
+        if ha_mode == SMBHAMODE.CLUSTERED:
+            ctdb_healthy = await self.middleware.call('ctdb.general.healthy')
+            if not ctdb_healthy:
+                raise CallError(
+                    "Registry calls not permitted when ctdb unhealthy.", errno.ENXIO
+                )
+
         share = kwargs.get('share')
         args = kwargs.get('args', [])
         cmd = [SMBCmd.NET.value, 'conf', action]
@@ -66,7 +74,7 @@ class SharingSMBService(Service):
 
     @private
     async def reg_listshares(self):
-        return (await self.netconf(action='listshares')).splitlines()
+        return (await self.netconf(action='listshares')).splitlines()[1:]
 
     @private
     async def reg_addshare(self, data):
@@ -113,7 +121,7 @@ class SharingSMBService(Service):
     async def reg_getparm(self, share, parm):
         to_list = ['vfs objects', 'hosts allow', 'hosts deny']
         try:
-            ret = await self.netconf(action='getparm', share=share, args=[parm])
+            ret = (await self.netconf(action='getparm', share=share, args=[parm])).strip()
         except CallError as e:
             if f"Error: given parameter '{parm}' is not set." in e.errmsg:
                 # Copy behavior of samba python binding
@@ -157,7 +165,7 @@ class SharingSMBService(Service):
     async def order_vfs_objects(self, vfs_objects):
         vfs_objects_special = ('catia', 'zfs_space', 'fruit', 'streams_xattr', 'shadow_copy_zfs',
                                'noacl', 'ixnas', 'acl_xattr', 'zfsacl', 'crossrename', 'recycle',
-                               'zfs_core', 'aio_fbsd', 'io_uring')
+                               'zfs_core', 'glusterfs', 'aio_fbsd', 'io_uring')
 
         vfs_objects_ordered = []
 
@@ -271,7 +279,11 @@ class SharingSMBService(Service):
         API for viewing samba's current running configuration, which
         is of particular importance with clustered registry shares.
         """
-        reg_shares = await self.reg_listshares()
+        try:
+            reg_shares = await self.reg_listshares()
+        except CallError:
+            return []
+
         rv = []
         for idx, name in enumerate(reg_shares):
             reg_conf = await self.reg_showshare(name)
@@ -301,7 +313,7 @@ class SharingSMBService(Service):
             "purpose": "NO_PRESET",
             "path": conf_in.pop("path"),
             "path_suffix": "",
-            "home": conf_in.pop("home"),
+            "home": conf_in.pop("home", False),
             "name": conf_in.pop("name"),
             "guestok": conf_in.pop("guest ok", "yes") == "yes",
             "browsable": conf_in.pop("browseable", "yes") == "yes",
@@ -309,17 +321,19 @@ class SharingSMBService(Service):
             "hostsdeny": conf_in.pop("hosts deny", []),
             "abe": conf_in.pop("access based share enumeration", False),
             "acl": True if "acl_xattr" in vfs_objects else False,
-            "ro": conf_in.pop("read only") == "yes",
+            "ro": conf_in.pop("read only", "yes") == "yes",
             "durable handle": conf_in.pop("posix locking", "yes") == "no",
             "streams": True if "streams_xattr" in vfs_objects else False,
             "timemachine": conf_in.pop("fruit:time machine", False),
             "recyclebin": True if "recycle" in vfs_objects else False,
+            "cluster_volname": conf_in.pop("glusterfs: volume", ""),
             "fsrvp": False,
             "enabled": True,
             "locked": False,
             "shadowcopy": False,
             "aapl_name_mangling": True if "catia" in vfs_objects else False,
         }
+        cluster_logfile = conf_in.pop("glusterfs: logfile", "")
         aux_list = [f"{k} = {v}" for k, v in conf_in.items()]
         ret["auxsmbconf"] = '\n'.join(aux_list)
         return ret
@@ -330,6 +344,7 @@ class SharingSMBService(Service):
         gl = await self.get_global_params(globalconf)
         await self.middleware.call('sharing.smb.strip_comments', data)
         conf = {}
+        is_clustered = bool(data.get("cluster_volname", ""))
 
         if data['home'] and gl['ad_enabled']:
             data['path_suffix'] = '%D/%U'
@@ -343,6 +358,10 @@ class SharingSMBService(Service):
 
         if osc.IS_FREEBSD:
             data['vfsobjects'] = ['aio_fbsd']
+        elif is_clustered:
+            conf["glusterfs: volume"] = data["cluster_volname"]
+            conf["glusterfs: logfile"] = f'/var/log/samba4/glusterfs-{data["cluster_volname"]}.log'
+            data['vfsobjects'] = ['glusterfs', 'io_uring']
         else:
             data['vfsobjects'] = ['zfs_core', 'io_uring']
 
