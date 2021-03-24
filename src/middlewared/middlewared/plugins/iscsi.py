@@ -7,6 +7,7 @@ import middlewared.sqlalchemy as sa
 from middlewared.utils import osc, run
 from middlewared.utils.path import is_child
 from middlewared.validators import Range
+from middlewared import ctld
 
 import asyncio
 import bidict
@@ -335,7 +336,10 @@ class iSCSITargetAuthCredentialService(CRUDService):
             {'prefix': self._config.datastore_prefix}
         )
 
-        await self._service_change('iscsitarget', 'reload')
+        try:
+            await self.ctld_set(data['tag'])
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
 
         return await self._get_instance(data['id'])
 
@@ -371,7 +375,12 @@ class iSCSITargetAuthCredentialService(CRUDService):
             {'prefix': self._config.datastore_prefix}
         )
 
-        await self._service_change('iscsitarget', 'reload')
+        try:
+            await self.ctld_set(new['tag'])
+            if new['tag'] != old['tag']:
+                await self.ctld_set(old['tag'])
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
 
         return await self._get_instance(id)
 
@@ -386,9 +395,14 @@ class iSCSITargetAuthCredentialService(CRUDService):
             if usages['in_use']:
                 raise CallError(usages['usages'])
 
-        return await self.middleware.call(
+        await self.middleware.call(
             'datastore.delete', self._config.datastore, id
         )
+
+        try:
+            await self.ctld_set(config['tag'])
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
 
     @private
     async def is_in_use_by_portals_targets(self, id):
@@ -449,6 +463,23 @@ class iSCSITargetAuthCredentialService(CRUDService):
                     f'{schema_name}.peersecret',
                     'Peer Secret must be between 12 and 16 characters.'
                 )
+
+    @private
+    async def ctld_set(self, tag):
+        auths = [
+            (i['iscsi_target_auth_user'], i['iscsi_target_auth_secret'], i['iscsi_target_auth_peeruser'], i['iscsi_target_auth_peersecret'])
+            for i in await self.middleware.call(
+            'datastore.query', 'services.iscsitargetauthcredential', [['iscsi_target_auth_tag', '=', tag]]
+        )]
+        with ctld.CTLDControl() as c:
+            for grp in await self.middleware.call(
+                'datastore.query', 'services.iscsitargetgroups', [['iscsi_target_authgroup', '=', tag]]
+            ):
+                type_ = grp['iscsi_target_authtype']
+                if type_ == 'CHAP Mutual':
+                    type_ = 'chap-mutual'
+                agname = 'ag4tg%d_%d' % (grp['iscsi_target']['id'], grp['id'])
+                c.auth_group_set(agname, type_, auths)
 
 
 class iSCSITargetExtentModel(sa.Model):
@@ -547,7 +578,14 @@ class iSCSITargetExtentService(SharingService):
             {'prefix': self._config.datastore_prefix}
         )
 
-        return await self._get_instance(data['id'])
+        instance = await self._get_instance(data['id'])
+
+        try:
+            await self.ctld_set(instance)
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
+
+        return instance
 
     @accepts(
         Int('id'),
@@ -587,9 +625,14 @@ class iSCSITargetExtentService(SharingService):
             {'prefix': self._config.datastore_prefix}
         )
 
-        await self._service_change('iscsitarget', 'reload')
+        instance = await self.get_instance(id)
 
-        return await self.get_instance(id)
+        try:
+            await self.ctld_set(instance)
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
+
+        return instance
 
     @accepts(
         Int('id'),
@@ -630,7 +673,10 @@ class iSCSITargetExtentService(SharingService):
                 'datastore.delete', self._config.datastore, id
             )
         finally:
-            await self._service_change('iscsitarget', 'reload')
+            try:
+                await self.ctld_del(data['name'])
+            except:  # in case of any error, do a legacy iscsitarget reload
+                await self._service_change('iscsitarget', 'reload')
 
     @private
     async def validate(self, data):
@@ -956,6 +1002,66 @@ class iSCSITargetExtentService(SharingService):
 
         return True
 
+    @private
+    async def ctld_set(self, e):
+        # Only handle ZVOL and File
+        if e['type'] == 'DISK':
+            if not e['path'].startswith('zvol/'):
+                raise RuntimeError("Unsupported disk for live-reconfiguration")
+
+            path = '/dev/' + e['path']
+        elif e['type'] == 'File':
+            path = e['path']
+
+        # mainly copied from etc_files/ctld.py
+        padded_serial = e['serial']
+        if not e['xen']:
+            for i in range(31 - len(e['serial'])):
+                padded_serial += ' '
+
+        pblocksize = None
+        if e['pblocksize']:
+            pblocksize = 0
+
+        options = {
+            "vendor": e['vendor'],
+            "product": "iSCSI Disk",
+            "revision": "0123",
+            "naa": e['naa'],
+        }
+
+        if e['insecure_tpc']:
+            options['insecure_tpc'] = "on"
+
+        rpm = 0
+        if e['rpm'] == 'SSD':
+            rpm = 1
+        elif e['rpm'] != 'Unknown':
+            rpm = e['rpm']
+
+        options['rpm'] = rpm
+
+        if e['ro']:
+            options['readonly'] = "on"
+
+        with ctld.CTLDControl() as c:
+            c.lun_set(
+                e['name'],
+                e['id'] - 1,
+                path,
+                e['blocksize'],
+                e['serial'],
+                "iSCSI Disk      %s" % padded_serial,
+                int(e['filesize']),
+                pblocksize,
+                **options,
+            )
+
+    @private
+    async def ctld_del(self, name):
+        with ctld.CTLDControl() as c:
+            c.lun_del(name)
+
 
 class iSCSITargetAuthorizedInitiatorModel(sa.Model):
     __tablename__ = 'services_iscsitargetauthorizedinitiator'
@@ -1168,9 +1274,14 @@ class iSCSITargetService(CRUDService):
             await self.middleware.call('datastore.delete', self._config.datastore, pk)
             raise e
 
-        await self._service_change('iscsitarget', 'reload')
+        instance = await self._get_instance(pk)
 
-        return await self._get_instance(pk)
+        try:
+            await self.ctld_add(instance)
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
+
+        return instance
 
     async def __save_groups(self, pk, new, old=None):
         """
@@ -1351,9 +1462,11 @@ class iSCSITargetService(CRUDService):
                 self.middleware.logger.warning('Target %s is in use.', target['name'])
             else:
                 raise CallError(f'Target {target["name"]} is in use.')
-        for target_to_extent in await self.middleware.call('iscsi.targetextent.query', [['target', '=', id]]):
-            await self.middleware.call('iscsi.targetextent.delete', target_to_extent['id'], force)
+        await self.middleware.call('datastore.delete', 'services.iscsitargettoextent', [['iscsi_target_id', '=', id]])
 
+        tgg = await self.middleware.call(
+            'datastore.query', 'services.iscsitargetgroups', [['iscsi_target', '=', id]]
+        )
         await self.middleware.call(
             'datastore.delete', 'services.iscsitargetgroups', [['iscsi_target', '=', id]]
         )
@@ -1370,7 +1483,11 @@ class iSCSITargetService(CRUDService):
             if cp.returncode:
                 self.middleware.logger.error('Failed to remove %r target: %s', target['name'], cp.stderr.decode())
 
-        await self._service_change('iscsitarget', 'reload')
+        try:
+            await self.ctld_del(target, tgg)
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
+
         return rv
 
     @private
@@ -1398,6 +1515,108 @@ class iSCSITargetService(CRUDService):
         for group in data['groups']:
             group['authmethod'] = AUTHMETHOD_LEGACY_MAP.inv.get(group.pop('authmethod'), 'NONE')
         return data
+
+    @private
+    async def target_name(self, target, gconf=None):
+        if (target['name'].startswith('iqn.') or
+                target['name'].startswith('eui.') or
+                target['name'].startswith('naa.')):
+            return target['name']
+
+        if gconf is None:
+            gconf = await self.middleware.call('datastore.query', 'services.iSCSITargetGlobalConfiguration',
+                                            [], {'get': True})
+
+        return '{}:{}'.format(gconf['iscsi_basename'], target['name'])
+
+    @private
+    async def ctld_add(self, target):
+        gconf = await self.middleware.call('datastore.query', 'services.iSCSITargetGlobalConfiguration',
+                                        [], {'get': True})
+
+        name = await self.target_name(target, gconf=gconf)
+
+        alias = target['alias']
+        if not alias:
+            alias = target['name']
+
+        groups = []
+        for grp in await self.middleware.call('datastore.query', 'services.iscsitargetgroups', [['iscsi_target', '=', target['id']]]):
+            groups.append({
+                'grp': grp,
+                'auths': [
+                    (i['iscsi_target_auth_user'], i['iscsi_target_auth_secret'], i['iscsi_target_auth_peeruser'], i['iscsi_target_auth_peersecret'])
+                    for i in await self.middleware.call(
+                    'datastore.query', 'services.iscsitargetauthcredential', [['iscsi_target_auth_tag', '=', grp['iscsi_target_authgroup']]])
+                ],
+                'agname': 'ag4tg%d_%d' % (target['id'], grp['id']),
+            })
+
+        with ctld.CTLDControl() as c:
+            pgs = []
+
+            for i in groups:
+                type_ = i['grp']['iscsi_target_authtype']
+                if type_ == 'CHAP Mutual':
+                    type_ = 'chap-mutual'
+
+                c.auth_group_set(i['agname'], type_.lower(), i['auths'])
+
+                pgtag = i['grp']['iscsi_target_portalgroup']['iscsi_target_portal_tag']
+
+                if gconf['iscsi_alua']:
+                    pgs.append('pg%dA:%s' % (pgtag, i['agname']))
+                    pgs.append('pg%dB:%s' % (pgtag, i['agname']))
+                else:
+                    pgs.append('pg%d:%s' % (pgtag, i['agname']))
+
+            # create target
+            c.target_add(name, alias, pgs)
+
+    @private
+    async def ctld_del(self, target, tgg):
+        name = await self.target_name(target)
+
+        with ctld.CTLDControl() as c:
+            c.target_del(name)
+
+            for grp in tgg:
+                agname = 'ag4tg%d_%d' % (target['id'], grp['id'])
+
+                c.auth_group_del(agname)
+
+    @private
+    async def ctld_set_luns(self, target):
+        if isinstance(target, int):
+            target = await self._get_instance(target)
+
+        name = await self.target_name(target)
+
+        assigned_luns = await self.middleware.call('datastore.query', 'services.iscsitargettoextent',
+                                        [('iscsi_target', '=', target['id']),
+                                         ('iscsi_lunid', '!=', None)],
+                                        {'order_by': ['iscsi_lunid']})
+        unassigned_luns = await self.middleware.call('datastore.query', 'services.iscsitargettoextent',
+                                        [('iscsi_target', '=', target['id']),
+                                         ('iscsi_lunid', '=', None)],
+                                        {'order_by': ['id']})
+
+        luns = []
+        luniter = iter(range(1024))
+        while assigned_luns or unassigned_luns:
+            lunidx = next(luniter)
+
+            if assigned_luns and lunidx == int(assigned_luns[0]['iscsi_lunid']):
+                t2e = assigned_luns[0]
+                assigned_luns = assigned_luns[1:]
+            else:
+                t2e = unassigned_luns[0]
+                unassigned_luns = unassigned_luns[1:]
+
+            luns.append('lun{}={}'.format(lunidx, t2e['iscsi_extent']['iscsi_target_extent_name']))
+
+        with ctld.CTLDControl() as c:
+            c.target_set_luns(name, luns)
 
 
 class iSCSITargetToExtentModel(sa.Model):
@@ -1447,7 +1666,10 @@ class iSCSITargetToExtentService(CRUDService):
             {'prefix': self._config.datastore_prefix}
         )
 
-        await self._service_change('iscsitarget', 'reload')
+        try:
+            await self.middleware.call('iscsi.target.ctld_set_luns', int(data['target']))
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
 
         return await self._get_instance(data['id'])
 
@@ -1507,7 +1729,10 @@ class iSCSITargetToExtentService(CRUDService):
             'datastore.delete', self._config.datastore, id
         )
 
-        await self._service_change('iscsitarget', 'reload')
+        try:
+            await self.middleware.call('iscsi.target.ctld_set_luns', int(associated_target['target']))
+        except:  # in case of any error, do a legacy iscsitarget reload
+            await self._service_change('iscsitarget', 'reload')
 
         return result
 
@@ -1593,14 +1818,16 @@ class ISCSIFSAttachmentDelegate(LockableFSAttachmentDelegate):
                 await self.middleware.call('datastore.delete', 'services.iscsitargettoextent', te['id'])
 
             await self.middleware.call('datastore.delete', 'services.iscsitargetextent', attachment['id'])
+            try:
+                await self.middleware.call('iscsi.extent.ctld_del', attachment['name'])
+            except:  # in case of any error, do a legacy iscsitarget reload
+                await self._service_change('iscsitarget', 'reload')
             await self.remove_alert(attachment)
 
         for te in await self.middleware.call('iscsi.targetextent.query', [['target', 'in', orphan_targets_ids]]):
             orphan_targets_ids.discard(te['target'])
         for target_id in orphan_targets_ids:
             await self.middleware.call('iscsi.target.delete', target_id, True)
-
-        await self._service_change('iscsitarget', 'reload')
 
         # For SCALE, reload action will remove existing LUN(s)
         if osc.IS_FREEBSD:
