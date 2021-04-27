@@ -22,6 +22,7 @@ dataset_url = dataset.replace('/', '%2F')
 SMB_NAME = "SMBPROTO"
 smb_path = "/mnt/" + dataset
 group = 'root' if scale else 'wheel'
+module_prefix = 'zfs_core' if scale else 'ixnas'
 
 
 guest_path_verification = {
@@ -112,6 +113,7 @@ def test_006_creating_a_smb_share_path(request):
         "comment": "SMB Protocol Testing Share",
         "path": smb_path,
         "name": SMB_NAME,
+        "auxsmbconf": f"{module_prefix}:base_user_quota = 1G"
     }
     results = POST("/sharing/smb/", payload)
     assert results.status_code == 200, results.text
@@ -376,6 +378,128 @@ def test_067_stream_delete_on_close_smb1(request):
 
     c.disconnect()
 
+
+"""
+At this point we grant SMB_USER SeDiskOperatorPrivilege by making it a member
+of the local group builtin_administrators. This privilege is required to manipulate
+SMB quotas.
+"""
+
+
+@pytest.mark.dependency(name="BA_ADDED_TO_USER")
+def test_089_add_to_builtin_admins(request):
+    depends(request, ["SHARE_IS_WRITABLE"])
+    ba = GET('/group?group=builtin_administrators').json()
+    assert len(ba) != 0
+
+    userinfo = GET(f'/user/id/{smbuser_id}').json()
+    groups = userinfo['groups']
+    groups.append(ba[0]['id'])
+
+    payload = {'groups': groups}
+    results = PUT(f"/user/id/{smbuser_id}/", payload)
+    assert results.status_code == 200, f"res: {results.text}, payload: {payload}"
+
+
+@pytest.mark.parametrize('proto', ["SMB2"])
+def test_090_test_auto_smb_quota(request, proto):
+    """
+    Since the share is configured wtih ixnas:base_user_quota parameter,
+    the first SMB tree connect should have set a ZFS user quota on the
+    underlying dataset. Test querying through the SMB protocol.
+
+    Currently SMB1 protocol is disabled because of hard-coded check in
+    source3/smbd/nttrans.c to only allow root to get/set quotas.
+    """
+    depends(request, ["BA_ADDED_TO_USER"])
+    c = SMB()
+    qt = c.get_quota(
+        host=ip,
+        share=SMB_NAME,
+        username=SMB_USER,
+        password=SMB_PWD,
+        smb1=(proto == "SMB1")
+    )
+
+    # There should only be one quota entry
+    assert len(qt) == 1, qt
+
+    # username is prefixed with server netbios name "SERVER\user"
+    assert qt[0]['user'].endswith(SMB_USER), qt
+
+    # Hard and Soft limits should be set to value above (1GiB)
+    assert qt[0]['soft_limit'] == (2 ** 30), qt
+    assert qt[0]['hard_limit'] == (2 ** 30), qt
+
+
+def test_091_remove_auto_quota_param(request):
+    depends(request, ["SMB_SHARE_CREATED"])
+    results = PUT(f"/sharing/smb/id/{smb_id}/", {"auxsmbconf": ""})
+    assert results.status_code == 200, results.text
+
+
+@pytest.mark.parametrize('proto', ["SMB2"])
+def test_092_set_smb_quota(request, proto):
+    """
+    This test checks our ability to set a ZFS quota
+    through the SMB protocol by first setting a 2 GiB
+    quota, then reading it through the SMB protocol, then
+    resetting to zero.
+    """
+    depends(request, ["BA_ADDED_TO_USER"])
+    new_quota = 2 * (2**30)
+    c = SMB()
+    qt = c.set_quota(
+        host=ip,
+        share=SMB_NAME,
+        username=SMB_USER,
+        password=SMB_PWD,
+        hardlimit=new_quota,
+        target=SMB_USER,
+        smb1=(proto == "SMB1")
+    )
+    assert len(qt) == 1, qt
+    assert qt[0]['user'].endswith(SMB_USER), qt
+    assert qt[0]['soft_limit'] == new_quota, qt
+    assert qt[0]['hard_limit'] == new_quota, qt
+
+    qt = c.get_quota(
+        host=ip,
+        share=SMB_NAME,
+        username=SMB_USER,
+        password=SMB_PWD,
+        smb1=(proto == "SMB1")
+    )
+    assert len(qt) == 1, qt
+    assert qt[0]['user'].endswith(SMB_USER), qt
+    assert qt[0]['soft_limit'] == new_quota, qt
+    assert qt[0]['hard_limit'] == new_quota, qt
+
+    qt = c.set_quota(
+        host=ip,
+        share=SMB_NAME,
+        username=SMB_USER,
+        password=SMB_PWD,
+        hardlimit=0,
+        target=SMB_USER,
+        smb1=(proto == "SMB1")
+    )
+    assert len(qt) == 1, qt
+    assert qt[0]['user'].endswith(SMB_USER), qt
+    assert qt[0]['soft_limit'] is None, qt
+    assert qt[0]['hard_limit'] is None, qt
+
+    qt = c.get_quota(
+        host=ip,
+        share=SMB_NAME,
+        username=SMB_USER,
+        password=SMB_PWD,
+        smb1=(proto == "SMB1")
+    )
+    assert len(qt) == 1, qt
+    assert qt[0]['user'].endswith(SMB_USER), qt
+    assert qt[0]['soft_limit'] is None, qt
+    assert qt[0]['hard_limit'] is None, qt
 
 
 def test_100_delete_smb_user(request):

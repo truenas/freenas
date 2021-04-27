@@ -2,6 +2,7 @@ from samba.samba3 import libsmb_samba_internal as libsmb
 from samba.dcerpc import security
 from samba.samba3 import param as s3param
 from samba import credentials
+import subprocess
 # from samba import NTSTATUSError
 
 
@@ -147,3 +148,66 @@ class SMB(object):
         return self._connection.write(
             self._open_files[idx]["fh"], data, offset
         )
+
+    def _parse_quota(self, quotaout):
+        ret = []
+        for entry in quotaout:
+            e = entry.split(":")
+            if len(e) != 2:
+                continue
+
+            user = e[0].strip()
+            used, soft, hard = e[1].split("/")
+
+            ret.append({
+                "user": user,
+                "used": int(used.strip()),
+                "soft_limit": int(soft.strip()) if soft.strip() != "NO LIMIT" else None,
+                "hard_limit": int(hard.strip()) if hard.strip() != "NO LIMIT" else None,
+            })
+
+        return ret
+
+    def get_quota(self, **kwargs):
+        host = kwargs.get("host")
+        share = kwargs.get("share")
+        username = kwargs.get("username")
+        password = kwargs.get("password")
+        do_list = kwargs.get("list")
+        smb1 = kwargs.get("smb1", False)
+
+        cmd = [
+            "smbcquotas", f"//{host}/{share}",
+            "-U", f"{username}%{password}",
+        ]
+        if do_list:
+            cmd.append("-L")
+
+        if smb1:
+            cmd.extend(["-m", "NT1"])
+
+        smbcquotas = subprocess.run(cmd, capture_output=True)
+        quotaout = smbcquotas.stdout.decode().splitlines()
+        return self._parse_quota(quotaout)
+
+    def set_quota(self, **kwargs):
+        host = kwargs.get("host")
+        share = kwargs.get("share")
+        username = kwargs.get("username")
+        password = kwargs.get("password")
+        target = kwargs.get("target")
+        hard_limit = kwargs.get("hardlimit", 0)
+        soft_limit = kwargs.get("softlimit", 0)
+        smb1 = kwargs.get("smb1", False)
+
+        cmd = [
+            "smbcquotas", f"//{host}/{share}",
+            "-S", f"UQLIM:{target}:{soft_limit}/{hard_limit}",
+            "-U", f"{username}%{password}",
+        ]
+        if smb1:
+            cmd.extend(["-m", "NT1"])
+
+        smbcquotas = subprocess.run(cmd, capture_output=True)
+        quotaout = smbcquotas.stdout.decode().splitlines()
+        return self._parse_quota(quotaout)
