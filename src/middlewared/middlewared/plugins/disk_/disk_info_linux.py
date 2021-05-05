@@ -123,7 +123,14 @@ class DiskService(Service, DiskInfoBase):
 
     def label_to_disk(self, label, *args):
         part_disk = self.label_to_dev(label)
-        return self.get_disk_from_partition(part_disk) if part_disk else None
+        if not part_disk:
+            # the label is already a disk
+            return label
+        elif os.path.exists(os.path.join('/sys/block', part_disk)):
+            # it's imported with a label, but it's a whole disk
+            return part_disk
+        else:
+            return self.get_disk_from_partition(part_disk)
 
     def get_disk_from_partition(self, part_name):
         if not os.path.exists(os.path.join('/dev', part_name)):

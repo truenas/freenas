@@ -369,7 +369,7 @@ class ZFSPoolService(CRUDService):
         found = False
         with libzfs.ZFS() as zfs:
             for pool in zfs.find_import(
-                cachefile=cachefile, search_paths=['/dev/disk/by-partuuid'] if osc.IS_LINUX else None
+                cachefile=cachefile, search_paths=['/dev/disk/by-partuuid', '/dev'] if osc.IS_LINUX else None
             ):
                 if pool.name == name_or_guid or str(pool.guid) == name_or_guid:
                     found = pool
