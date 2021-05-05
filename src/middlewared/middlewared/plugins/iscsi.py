@@ -455,6 +455,9 @@ class iSCSITargetAuthCredentialService(CRUDService):
 
 class iSCSITargetExtentModel(sa.Model):
     __tablename__ = 'services_iscsitargetextent'
+    __table_args__ = (
+        sa.UniqueConstraint('iscsi_target_extent_name', name='iscsi_target_extent_name_unique'),
+    )
 
     id = sa.Column(sa.Integer(), primary_key=True)
     iscsi_target_extent_name = sa.Column(sa.String(120))
@@ -1118,6 +1121,10 @@ class iSCSITargetAuthorizedInitiator(CRUDService):
 
 class iSCSITargetModel(sa.Model):
     __tablename__ = 'services_iscsitarget'
+    __table_args__ = (
+        sa.UniqueConstraint('iscsi_target_name', name='iscsi_target_name_unique'),
+        sa.UniqueConstraint('iscsi_target_alias', name='iscsi_target_alias_unique'),
+    )
 
     id = sa.Column(sa.Integer(), primary_key=True)
     iscsi_target_name = sa.Column(sa.String(120))

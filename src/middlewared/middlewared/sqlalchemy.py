@@ -3,7 +3,7 @@ import json
 
 import isodate
 from sqlalchemy import (
-    Table, Column as _Column, ForeignKey, Index,
+    Table, Column as _Column, ForeignKey, Index, UniqueConstraint,
     Boolean, CHAR, DateTime, Integer, SmallInteger, String, Text,
 )  # noqa
 from sqlalchemy.ext.declarative import declarative_base
