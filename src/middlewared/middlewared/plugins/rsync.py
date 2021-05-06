@@ -698,16 +698,39 @@ class RsyncTaskService(TaskPathService):
             self.middleware.call_sync('alert.oneshot_delete', klass, rsync['id'])
 
         if cp.returncode not in RsyncReturnCode.nonfatals():
+            err = None
+            if cp.returncode == RsyncReturnCode.STREAMIO and rsync['compress']:
+                err = (
+                    "rsync command with compression enabled failed with STREAMIO error. "
+                    "This may indicate that remote server lacks support for the new-style "
+                    "compression used by TrueNAS."
+                )
+
             if not rsync['quiet']:
-                self.middleware.call_sync('alert.oneshot_create', 'RsyncFailed', {
+                rsync_alert = {
                     'id': rsync['id'],
                     'direction': rsync['direction'],
                     'path': rsync['path'],
-                })
+                }
+                if err:
+                    rsync_alert['additional_info'] = err
 
-            raise CallError(
-                f'rsync command returned {cp.returncode}. Check logs for further information.'
-            )
+                self.middleware.call_sync('alert.oneshot_create', 'RsyncFailed', rsync_alert)
+
+            if err:
+                msg = f'{err} Check logs for further information'
+            else:
+                try:
+                    rc_name = RsyncReturnCode(cp.returncode).name
+                except ValueError:
+                    rc_name = 'UNKNOWN'
+
+                msg = (
+                    f'rsync command returned {cp.returncode} - {rc_name}. '
+                    'Check logs for further information.'
+                )
+            raise CallError(msg)
+
         elif not rsync['quiet']:
             self.middleware.call_sync('alert.oneshot_create', 'RsyncSuccess', {
                 'id': rsync['id'],
