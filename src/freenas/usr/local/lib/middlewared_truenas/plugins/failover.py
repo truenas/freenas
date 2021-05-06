@@ -379,7 +379,7 @@ class FailoverService(ConfigService):
         if await self.middleware.call('failover.status') == 'MASTER':
             return False
 
-        if not await self.middleware.call('failover.fenced.force'):
+        if not await self.middleware.call('failover.fenced.start', {'force': True}):
             return False
 
         for i in await self.middleware.call('interface.query', [('failover_critical', '!=', None)]):
