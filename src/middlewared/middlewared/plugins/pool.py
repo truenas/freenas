@@ -2751,9 +2751,11 @@ class PoolDatasetService(CRUDService):
                 zfsfilters.append(['id', '=', f[2]])
                 break
 
+        extra = options.get('extra', {})
+        extra.setdefault('flat', True)
         return filter_list(
             self.__transform(self.middleware.call_sync(
-                'zfs.dataset.query', zfsfilters, {'extra': {'flat': options.get('extra', {}).get('flat', True)}})
+                'zfs.dataset.query', zfsfilters, {'extra': extra})
             ), filters, options
         )
 
@@ -2810,7 +2812,7 @@ class PoolDatasetService(CRUDService):
             dataset['locked'] = dataset['encrypted'] and not dataset['key_loaded']
 
             rv = []
-            for child in dataset['children']:
+            for child in dataset.get('children', []):
                 rv.append(transform(child))
             dataset['children'] = rv
 
@@ -2909,9 +2911,16 @@ class PoolDatasetService(CRUDService):
 
         if '/' not in data['name']:
             verrors.add('pool_dataset_create.name', 'You need a full name, e.g. pool/newdataset')
+            raise verrors
         else:
-            await self.__common_validation(verrors, 'pool_dataset_create', data, 'CREATE')
+            parent_ds = await self.middleware.call(
+                'pool.dataset.query',
+                [('id', '=', data['name'].rsplit('/', 1)[0])],
+                {'extra': {'recursive': False}},
+            )
+            await self.__common_validation(verrors, 'pool_dataset_create', data, 'CREATE', parent_ds)
 
+        parent_ds = parent_ds[0]
         mountpoint = os.path.join('/mnt', data['name'])
         if os.path.exists(mountpoint):
             verrors.add('pool_dataset_create.name', f'Path {mountpoint} already exists')
@@ -2927,7 +2936,7 @@ class PoolDatasetService(CRUDService):
             if osc.IS_FREEBSD:
                 data['aclmode'] = 'RESTRICTED'
 
-        if (await self.get_instance(data['name'].rsplit('/', 1)[0]))['locked']:
+        if parent_ds['locked']:
             verrors.add(
                 'pool_dataset_create.name',
                 f'{data["name"].rsplit("/", 1)[0]} must be unlocked to create {data["name"]}.'
@@ -3157,13 +3166,15 @@ class PoolDatasetService(CRUDService):
 
         return await self.get_instance(id)
 
-    async def __common_validation(self, verrors, schema, data, mode):
+    async def __common_validation(self, verrors, schema, data, mode, parent=None):
         assert mode in ('CREATE', 'UPDATE')
 
-        parent = await self.middleware.call(
-            'zfs.dataset.query',
-            [('id', '=', data['name'].rsplit('/')[0])]
-        )
+        if parent is None:
+            parent = await self.middleware.call(
+                'pool.dataset.query',
+                [('id', '=', data['name'].rsplit('/', 1)[0])],
+                {'extra': {'recursive': False}},
+            )
 
         if not parent:
             verrors.add(
@@ -3204,12 +3215,13 @@ class PoolDatasetService(CRUDService):
 
             if 'volsize' in data and parent:
 
-                avail_mem = int(parent['properties']['available']['rawvalue'])
+                avail_mem = int(parent['available']['rawvalue'])
 
                 if mode == 'UPDATE':
                     avail_mem += int((await self.middleware.call(
                         'zfs.dataset.query',
-                        [['id', '=', data['name']]]
+                        [['id', '=', data['name']]],
+                        {'extra': {'recursive': False}},
                     ))[0]['properties']['used']['rawvalue'])
 
                 if (
