@@ -9,7 +9,8 @@ try:
 except ImportError:
     Update = PendingUpdates = None
 
-from middlewared.alert.base import AlertClass, AlertCategory, AlertLevel, Alert, FilePresenceAlertSource, ThreadedAlertSource
+from middlewared.alert.base import (AlertClass, SimpleOneShotAlertClass, AlertCategory, AlertLevel, Alert,
+                                    FilePresenceAlertSource, ThreadedAlertSource)
 from middlewared.alert.schedule import IntervalSchedule
 
 UPDATE_APPLIED_SENTINEL = "/tmp/.updateapplied"
@@ -105,7 +106,7 @@ class UpdateNotAppliedAlertSource(ThreadedAlertSource):
                 return
 
             if is_update_applied:
-                update_applied, msg = is_update_applied(data["update_version"], create_alert=False)
+                update_applied, msg = is_update_applied(data["update_version"])
                 if update_applied:
                     return Alert(UpdateNotAppliedAlertClass, msg)
 
@@ -120,3 +121,16 @@ class UpdateFailedAlertClass(AlertClass):
 class UpdateFailedAlertSource(FilePresenceAlertSource):
     path = "/data/update.failed"
     klass = UpdateFailedAlertClass
+
+
+class CurrentVersionIsNotEnterpriseReadyAlertClass(AlertClass, SimpleOneShotAlertClass):
+    category = AlertCategory.SYSTEM
+    level = AlertLevel.CRITICAL
+    title = "Current System Version Is Not Enterprise-Ready"
+    text = (
+        "Current system version %(current_version)s is not Enterprise-Ready. The latest Enterprise-Ready version is "
+        "%(new_version)s."
+    )
+
+    async def delete(self, alerts, query):
+        return []

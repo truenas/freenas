@@ -32,8 +32,10 @@ class UpdateService(Service):
             location,
             check_handler=handler.check_handler,
             get_handler=handler.get_handler,
+            **self.middleware.call_sync('update.trains_kwargs'),
         )
-        update = Update.CheckForUpdates(train=train, cache_dir=location)
+        update = Update.CheckForUpdates(train=train, cache_dir=location,
+                                        **self.middleware.call_sync('update.trains_kwargs'))
 
         result = bool(update)
 
