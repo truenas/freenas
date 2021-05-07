@@ -67,6 +67,11 @@ class CatalogService(Service):
         options = options or {}
         questions_context = self.middleware.call_sync('catalog.get_normalised_questions_context')
         unhealthy_apps = set()
+        if options.get('alert') and options.get('label'):
+            preferred_trains = self.middleware.call_sync('catalog.get_instance', options['label'])['preferred_trains']
+        else:
+            preferred_trains = []
+
         for train in os.listdir(location):
             if (
                 not os.path.isdir(os.path.join(location, train)) or train.startswith('.') or 
@@ -98,7 +103,8 @@ class CatalogService(Service):
                     for verror in verrors:
                         item_data['healthy_error'] += f'{verror[0]}: {verror[1]}'
 
-                    unhealthy_apps.add(f'{item} ({train} train)')
+                    if train in preferred_trains:
+                        unhealthy_apps.add(f'{item} ({train} train)')
                     # If the item format is not valid - there is no point descending any further into versions
                     continue
 
@@ -111,12 +117,13 @@ class CatalogService(Service):
                         unhealthy_versions.append(k)
 
                 if unhealthy_versions:
-                    unhealthy_apps.add(f'{item} ({train} train)')
+                    if train in preferred_trains:
+                        unhealthy_apps.add(f'{item} ({train} train)')
                     item_data['healthy_error'] = f'Errors were found with {", ".join(unhealthy_versions)} version(s)'
                 else:
                     item_data['healthy'] = True
 
-        if options.get('alert') and options.get('label') and unhealthy_apps:
+        if unhealthy_apps:
             self.middleware.call_sync(
                 'alert.oneshot_create', 'CatalogNotHealthy', {
                     'catalog': options['label'], 'apps': ', '.join(unhealthy_apps)
