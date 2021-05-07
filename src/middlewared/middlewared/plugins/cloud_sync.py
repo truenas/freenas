@@ -18,6 +18,7 @@ import base64
 import codecs
 from collections import namedtuple
 import configparser
+import contextlib
 from Crypto import Random
 from Crypto.Cipher import AES
 from Crypto.Util import Counter
@@ -31,6 +32,8 @@ import shlex
 import subprocess
 import tempfile
 import textwrap
+
+XATTR_DUMP_FILENAME = ".truenas-xattr-dump.xz"
 
 RE_TRANSF1 = re.compile(r"Transferred:\s*(?P<progress_1>.+), (?P<progress>[0-9]+)%$")
 RE_TRANSF2 = re.compile(r"Transferred:\s*(?P<progress_1>.+, )(?P<progress>[0-9]+)%, (?P<progress_2>.+)$")
@@ -187,6 +190,13 @@ async def rclone(middleware, job, cloud_sync, dry_run=False):
         snapshot = None
         path = cloud_sync["path"]
         if cloud_sync["direction"] == "PUSH":
+            if cloud_sync["xattr"]:
+                """
+                TODO: compress this file
+                TODO: do not change this file mtime if its contents is not changed
+                await run_script(job, {}, f"getfacl -R . > {XATTR_DUMP_FILENAME}", "Dump xattr", cwd=path)
+                """
+
             if cloud_sync["snapshot"]:
                 dataset, recursive = get_dataset_recursive(
                     await middleware.call("zfs.dataset.query"), cloud_sync["path"])
@@ -216,7 +226,7 @@ async def rclone(middleware, job, cloud_sync, dry_run=False):
                 env[f"CLOUD_SYNC_{k.upper()}"] = str(v)
         env["CLOUD_SYNC_PATH"] = path
 
-        await run_script(job, env, cloud_sync["pre_script"], "Pre-script")
+        await run_script(job, {}, cloud_sync["pre_script"], "Pre-script")
 
         job.middleware.logger.debug("Running %r", args)
         proc = await Popen(
@@ -240,6 +250,18 @@ async def rclone(middleware, job, cloud_sync, dry_run=False):
 
         if snapshot:
             await middleware.call("zfs.snapshot.remove", snapshot)
+
+        if cloud_sync["direction"] == "PULL":
+            try:
+                """
+                await run_script(job, {}, f"setfacl --restore={XATTR_DUMP_FILENAME}", "Restore xattr",
+                                 cwd=cloud_sync["path"])
+                """
+            except ValueError as e:
+                job.logs_fd.write(f"{e}\n".encode("utf-8"))
+
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(os.path.join(cloud_sync["path"], XATTR_DUMP_FILENAME))
 
         if cancelled_error is not None:
             raise cancelled_error
@@ -270,7 +292,7 @@ async def rclone(middleware, job, cloud_sync, dry_run=False):
                 })
 
 
-async def run_script(job, env, hook, script_name):
+async def run_script(job, env, hook, script_name, **kwargs):
     hook = hook.strip()
     if not hook:
         return
@@ -285,11 +307,13 @@ async def run_script(job, env, hook, script_name):
         with open(name, "w+") as f:
             f.write(hook)
 
+        job.set_progress(0, f"Running {script_name}")
         proc = await Popen(
             [name],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=dict(os.environ, **env),
+            **kwargs,
         )
         future = asyncio.ensure_future(run_script_check(job, proc, script_name))
         await proc.wait()
@@ -697,6 +721,7 @@ class CloudSyncModel(sa.Model):
     exclude = sa.Column(sa.JSON(type=list))
     transfers = sa.Column(sa.Integer(), nullable=True)
     follow_symlinks = sa.Column(sa.Boolean())
+    xattr = sa.Column(sa.Boolean())
 
 
 class CloudSyncService(TaskPathService):
@@ -886,6 +911,7 @@ class CloudSyncService(TaskPathService):
         Bool("snapshot", default=False),
         Str("pre_script", default="", max_length=None),
         Str("post_script", default="", max_length=None),
+        Bool("xattr", default=False),
         Str("args", default="", max_length=None),
         Bool("enabled", default=True),
         register=True,
