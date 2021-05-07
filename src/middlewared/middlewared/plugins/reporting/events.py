@@ -1,6 +1,5 @@
 from collections import defaultdict
 import glob
-import itertools
 import json
 import psutil
 import re
@@ -14,6 +13,7 @@ from middlewared.event import EventSource
 from middlewared.utils import osc
 
 from .iostat import DiskStats
+from .share_stats import ShareStats
 
 if osc.IS_FREEBSD:
     import sysctl
@@ -166,12 +166,11 @@ class RealtimeEventSource(EventSource):
             'time': time.monotonic(),
             'speeds': self.get_interface_speeds(),
         }
-        if osc.IS_LINUX:
-            disk_stats = DiskStats()
+        disk_stats = DiskStats()
+        share_stats = ShareStats(self.middleware)
 
         while not self._cancel_sync.is_set():
             data = {}
-
 
             # ZFS ARC Size (raw value is in Bytes)
             hits = 0
@@ -304,8 +303,8 @@ class RealtimeEventSource(EventSource):
                         'stats_time': stats_time,
                     }
 
-            if osc.IS_LINUX:
-                data['disks'] = disk_stats.get()
+            data['disks'] = disk_stats.get()
+            data['shares'] = share_stats.get()
 
             self.send_event('ADDED', fields=data)
             time.sleep(2)

@@ -113,3 +113,9 @@ class SMBService(Service):
             output = output["notify"]
 
         return filter_list(output, filters, options)
+
+    async def client_count(self):
+        """
+        Return currently connected clients count.
+        """
+        return await self.middleware.call("smb.status", "SESSIONS", [], {"count": True}, {"fast": True})
