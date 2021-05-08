@@ -156,8 +156,8 @@ class SharingSMBService(Service):
     @private
     async def order_vfs_objects(self, vfs_objects):
         vfs_objects_special = ('catia', 'zfs_space', 'fruit', 'streams_xattr', 'shadow_copy_zfs',
-                               'noacl', 'ixnas', 'acl_xattr', 'zfsacl', 'crossrename', 'recycle',
-                               'zfs_core', 'aio_fbsd', 'io_uring')
+                               'noacl', 'ixnas', 'acl_xattr', 'zfsacl', 'nfs4acl_xattr',
+                               'crossrename', 'recycle', 'zfs_core', 'aio_fbsd', 'io_uring')
 
         vfs_objects_ordered = []
 
@@ -337,8 +337,24 @@ class SharingSMBService(Service):
             data['path_suffix'] = '%U'
 
         if data['path']:
+            try:
+                ds = await self.middleware.call('pool.dataset.from_path', data['path'], False)
+                acltype = ds['acltype']['value']
+            except Exception:
+                self.logger.warning("Failed to obtain ZFS dataset for path %s. "
+                                    "Unable to automatically configuration ACL settings.",
+                                    data['path'], exc_info=True)
+                acltype = "UNKNOWN"
             conf['path'] = '/'.join([data['path'], data['path_suffix']]) if data['path_suffix'] else data['path']
         else:
+            """
+            An empty path may be valid for a [homes] share.
+            In this situation, samba will generate the share path during TCON
+            using user's home directory. This makes it impossible for us to
+            determine correct configuration for share, but some customers rely
+            on this particular old samba feature.
+            """
+            acltype = "UNKNOWN"
             conf['path'] = ''
 
         if osc.IS_FREEBSD:
@@ -366,7 +382,22 @@ class SharingSMBService(Service):
             if osc.IS_FREEBSD:
                 data['vfsobjects'].append('ixnas')
             else:
-                data['vfsobjects'].append('acl_xattr')
+                if acltype == "NFSV4":
+                    data['vfsobjects'].append('nfs4acl_xattr')
+                    conf.update({
+                        "nfs4acl_xattr:nfs4_id_numeric": "yes",
+                        "nfs4acl_xattr:validate_mode": "no",
+                        "nfs4acl_xattr:xattr_name": "system.nfs4_acl_xdr",
+                        "nfs4acl_xattr:encoding": "xdr",
+                    })
+                elif acltype == "POSIX" or acltype == "UNKNOWN":
+                    data['vfsobjects'].append('acl_xattr')
+                else:
+                    self.logger.debug("ACLs are disabled on path %s. "
+                                      "Disabling NT ACL support.",
+                                      data['path'])
+                    conf["nt acl support"] = "no"
+
         elif osc.IS_FREEBSD:
             data['vfsobjects'].append('noacl')
         else:

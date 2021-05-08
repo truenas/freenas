@@ -265,8 +265,8 @@ class FilesystemService(Service):
             raise CallError(f'Path not found [{path}].', errno.ENOENT)
 
         if osc.IS_LINUX:
-            posix1e_acl = self.middleware.call_sync('filesystem.getacl_posix1e', path, True)
-            return True if len(posix1e_acl['acl']) == 3 else False
+            acl = self.middleware.call_sync('filesystem.getacl', path, True)
+            return acl['trivial']
 
         if not os.pathconf(path, 64):
             return True

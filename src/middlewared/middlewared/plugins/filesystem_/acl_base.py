@@ -11,8 +11,6 @@ OS_FLAG = OS_TYPE_FREEBSD if osc.IS_FREEBSD else OS_TYPE_LINUX
 class ACLType(enum.Enum):
     NFS4 = (OS_TYPE_FREEBSD, ['tag', 'id', 'perms', 'flags', 'type'])
     POSIX1E = (OS_TYPE_FREEBSD | OS_TYPE_LINUX, ['default', 'tag', 'id', 'perms'])
-    RICH = (OS_TYPE_LINUX,)
-    SAMBA = (OS_TYPE_LINUX,)
 
     def validate(self, theacl):
         errors = []
@@ -27,10 +25,20 @@ class ACLType(enum.Enum):
         for idx, entry in enumerate(theacl['dacl']):
             extra = set(entry.keys()) - set(ace_keys)
             missing = set(ace_keys) - set(entry.keys())
-            if extra:
-                errors.append(f"ACL entry [{idx}] contains invalid extra key(s): {extra}")
-            if missing:
-                errors.append(f"ACL entry [{idx}] is missing required keys(s): {missing}")
+            if osc.IS_FREEBSD:
+                if extra:
+                    errors.append(f"ACL entry [{idx}] contains invalid extra key(s): {extra}")
+                if missing:
+                    errors.append(f"ACL entry [{idx}] is missing required keys(s): {missing}")
+            else:
+                if extra:
+                    errors.append(
+                        (idx, f"ACL entry contains invalid extra key(s): {extra}")
+                    )
+                if missing:
+                    errors.append(
+                        (idx, f"ACL entry is missing required keys(s): {missing}")
+                    )
 
         return {"is_valid": len(errors) == 0, "errors": errors}
 
@@ -245,8 +253,8 @@ class ACLBase(ServicePartBase):
             ),
             Dict(
                 'nfs41_flags',
-                Bool('autoinherit', default=False),
-                Bool('protected', default=False),
+                Bool('AUTOINHERIT', default=False),
+                Bool('PROTECTED', default=False),
             ),
             Str('acltype', enum=[x.name for x in ACLType], default=ACLType.NFS4.name),
             Dict(
