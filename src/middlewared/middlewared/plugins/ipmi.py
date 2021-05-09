@@ -3,6 +3,7 @@ try:
 except ImportError:
     kld = None
 
+from middlewared.plugins.ipmi_.utils import parse_ipmitool_output
 from middlewared.schema import Bool, Dict, Int, IPAddr, Str, accepts
 from middlewared.service import CallError, CRUDService, filterable, ValidationErrors
 from middlewared.utils import filter_list, run
@@ -171,6 +172,23 @@ class IPMIService(CRUDService):
         else:
             cmd = str(options.get('seconds'))
         await run('ipmitool', 'chassis', 'identify', cmd)
+
+    @filterable
+    async def query_sel(self):
+        """
+        Query IPMI System Event Log
+        """
+        return [
+            record._asdict()
+            for record in parse_ipmitool_output(await run('ipmitool', '-c', 'sel', 'elist'))
+        ]
+
+    @accepts()
+    async def clear_sel(self):
+        """
+        Clear IPMI System Event Log
+        """
+        await run('ipmitool', 'sel', 'clear')
 
 
 async def setup(middleware):

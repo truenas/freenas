@@ -6,11 +6,12 @@ from mock import ANY, Mock
 import pytest
 
 from middlewared.alert.source.ipmi_sel import (
-    IPMISELRecord, parse_ipmitool_output, parse_sel_information,
+    parse_sel_information,
     IPMISELAlertClass, IPMISELSpaceLeftAlertClass,
     IPMISELAlertSource, IPMISELSpaceLeftAlertSource,
-    Alert
+    Alert,
 )
+from middlewared.plugins.ipmi_.utils import IPMISELRecord, parse_ipmitool_output
 
 
 def test__parse_ipmitool_output():
